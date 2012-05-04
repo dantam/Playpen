@@ -10,6 +10,7 @@
 # pip install lxml --upgrade
 
 import argparse
+import math
 import re
 import random
 import os
@@ -94,10 +95,12 @@ def cosine(base_model, target_model):
         if k in base_model:
             numerator = numerator + base_model[k] * target_model[k]
 
-    denominator = 0
+    denominator = 1
     for model in [base_model, target_model]:
+        denominator_accum = 0
         for k in model.keys():
-            denominator = denominator + model[k] * model[k]
+            denominator_accum = denominator_accum + model[k] * model[k]
+        denominator = denominator * math.sqrt(denominator_accum)
     
     return 1.0 * numerator / denominator
 
