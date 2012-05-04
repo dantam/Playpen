@@ -1,0 +1,173 @@
+#!/usr/bin/env python
+
+# a basic text classifying script, also as an exercise to try nltk
+# 
+# needs a few packages, possibly with sudo:
+# curl https://raw.github.com/pypa/pip/master/contrib/get-pip.py | python
+# pip install numpy --upgrade
+# pip install nltk --upgrade
+# pip install beautifulsoup4 --upgrade
+# pip install lxml --upgrade
+
+import argparse
+import re
+import random
+import os
+import urllib2
+import nltk
+import string
+import distutils.dir_util
+import cPickle as pickle
+
+from bs4 import BeautifulSoup
+from nltk.corpus import stopwords
+
+def visible(element):
+    ''' taken from stackoverflow, with slight modification for unicode '''
+    if element.parent.name in ['style', 'script', '[document]', 'head']:
+        return False
+    elif re.match('<!--.*-->', unicode(element)):
+        return False
+    return True
+
+def get_text_from_url(url):
+    print url
+    opener = urllib2.build_opener()
+    if url.startswith('http://en.wiki'):
+        opener.addheaders = [('User-agent', 'Mozilla/5.0')]
+    infile = opener.open(url)
+    html_doc = infile.read()
+    soup = BeautifulSoup(html_doc)
+    texts = soup.findAll(text=True)
+    return ' '.join(filter(visible, texts))
+
+def get_text_from_file(file):
+    with open(file, 'r') as f:
+        return f.read()
+
+def add_word_count(model, text):
+    for sent in nltk.sent_tokenize(text.lower()):
+        for word in nltk.word_tokenize(sent):
+            model.inc(word)
+
+def get_special_words(m1, m2, criteria='match', t=0.05):
+    values = []
+    for k in m1.keys():
+        r1 = m1.freq(k) * 100.0
+        r2 = m2.freq(k) * 100.0
+        if k not in stopwords.words('english') and r1 > t and r2 > t and k not in string.punctuation and not k.isdigit():
+            if criteria == 'match':
+                if k in m2:
+                    values.append([k, m1[k], m2[k], r1, r2])
+            else:
+                if m2[k] == 0:
+                    values.append([k, m1[k], m2[k], r1, r2])
+    return values
+
+def column_lengths(values):
+    results = []
+    for i in range(len(values[0])):
+        s = max(values, key=lambda x: len(unicode(x[i])))[i]
+        results.append(len(unicode(s)))
+    return results
+
+def format_special_words(values, title):
+    if len(values) == 0:
+        print "There were 0 %s" % title
+        return
+    print title
+    clens = column_lengths(values)
+    for v in values:
+        v[0] = unicode(v[0]).rjust(clens[0])
+        v[1] = unicode(v[1]).rjust(clens[1])
+        v[2] = unicode(v[2]).rjust(clens[2])
+        print "%s %s %s %.2f %.2f" % (v[0], v[1], v[2], v[3], v[4])
+    print
+
+def get_cluster_pickle_paths(file):
+    prefix = "%s/%s" % (args.output_dir, file.split('/')[-1])
+    return ["%s.pckl" % prefix, "%s.cosine.pkcl" % prefix]
+
+def cosine(base_model, target_model):
+    numerator = 0
+    for k in target_model.keys():
+        if k in base_model:
+            numerator = numerator + base_model[k] * target_model[k]
+
+    denominator = 0
+    for model in [base_model, target_model]:
+        for k in model.keys():
+            denominator = denominator + model[k] * model[k]
+    
+    return 1.0 * numerator / denominator
+
+def get_random_model(base_model, target_model):
+    all_words = []
+    for model in [base_model, target_model]:
+        all_words = all_words + [w for k in model for w in [k] * model[k]]
+    random_model = nltk.FreqDist()
+    for rand_word in random.sample(all_words, sum(target_model.values())):
+        random_model.inc(rand_word)
+
+    return random_model
+
+def analyze(cluster_file, text):
+    base_model = nltk.FreqDist()
+    cpick, ccpick = get_cluster_pickle_paths(cluster_file)
+    if os.path.exists(cpick) and os.path.getmtime(cpick) > os.path.getmtime(cluster_file):
+        base_model = pickle.load(open(cpick, 'r'))
+        cosine_scores = pickle.load(open(ccpick, 'r'))
+    else:
+        urls = [url.strip() for url in open(cluster_file, 'r').readlines()]
+        cluster_models = []
+        for url in urls:
+            txt = get_text_from_url(url)
+            add_word_count(base_model, txt)
+            cluster_model = nltk.FreqDist()
+            add_word_count(cluster_model, txt)
+            cluster_models.append(cluster_model)
+
+        pickle.dump(base_model, open(cpick, 'w'))
+        cosine_scores = []
+        for cluster_model in cluster_models:
+            cosine_scores.append(cosine(base_model, cluster_model))
+        pickle.dump(cosine_scores, open(ccpick, 'w'))
+
+    target_model = nltk.FreqDist()
+    add_word_count(target_model, text)
+
+    if args.print_word_tables:
+        hits = get_special_words(target_model, base_model)
+        format_special_words(hits, "Words in target text that appear in cluster, ranked by word frequency in text")
+
+        base_misses = get_special_words(target_model, base_model, 'missing', -1)
+        format_special_words(base_misses, "Words in target text that do not appear in cluster, ranked by word frequency in text")
+
+        target_misses = get_special_words(base_model, target_model, 'missing')
+        format_special_words(target_misses, "Words in cluster text that do not appear in target, ranked by word frequency in text")
+
+    print cosine(base_model, target_model)
+    print cosine_scores
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Basic text clustering. Train from a known cluster. Test membership for cluster.')
+    parser.add_argument('-c', '--cluster_file', dest='cluster_file', action='store', required=True,
+                        help='plain text file of URLs that point to known cluster, one URL per line.')
+    parser.add_argument('-t', '--test_data', dest='test_data', action='store', required=True,
+                        help='file or URL to test for membership in cluster.')
+    parser.add_argument('-o', '--output_dir', dest='output_dir', action='store', default='./output',
+                        help='output dir for cache files.')
+    parser.add_argument('-p', '--print_word_tables', dest='print_word_tables', action='store_true', default=False,
+                        help='print word frequency tables')
+    return parser.parse_args()
+
+def get_test_data(entry):
+    if os.path.exists(entry):
+        return get_text_from_file(entry)
+    return get_text_from_url(entry)
+
+if __name__ == '__main__':
+    args = parse_args()
+    distutils.dir_util.mkpath(args.output_dir)
+    text = get_test_data(args.test_data)
+    analyze(args.cluster_file, text)

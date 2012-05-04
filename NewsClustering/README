@@ -1,0 +1,5 @@
+basic example run:
+
+./bin/cluster_membership_test -c data/cluster.1 -t data/translated.txt
+./bin/cluster_membership_test -c data/cluster.1 -t data/relevant.translated.txt
+./bin/cluster_membership_test -c data/cluster.2 -t http://www.reuters.com/article/2012/05/04/us-china-usa-paper-idUSBRE8430BE20120504
