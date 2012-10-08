@@ -1,0 +1,207 @@
+#!/usr/bin/env python
+
+import argparse
+import collections
+import itertools
+import math
+import operator
+import random
+import sys
+
+def parse_and_do_work():
+    parser = argparse.ArgumentParser(
+        description='Model proportional representation election. '
+            'With largest remainder and Hare quota. '
+            'Compare simulated results of split and join tickets. '
+            'Assume two groups of allies.')
+
+    shared_parser = argparse.ArgumentParser(add_help=False)
+    shared_parser.add_argument('--sigma_1',
+        dest='sigma_1', action='store', default=0, type=float,
+        help='sigma in gaussian for group 1 vote distribution')
+    shared_parser.add_argument('--sigma_2',
+        dest='sigma_2', action='store', default=0, type=float,
+        help='sigma in gaussian for group 2 vote distribution')
+    shared_parser.add_argument('-v', '--verbose',
+        dest='verbose', action='store_true', default=False,
+        help='print debug messages.')
+
+    setting_parser = argparse.ArgumentParser(add_help=False)
+    setting_parser.add_argument('-p', '--percentage_votes_group_1',
+        dest='p1', action='store', required=True, type=float,
+        help='percentage of votes for group 1, between 0 and 100')
+    setting_parser.add_argument('-n', '--num_seats', type=int,
+        dest='num_seats', action='store', required=True,
+        help='number of seats up for election.')
+
+    subparsers = parser.add_subparsers()
+    strategy_parser = subparsers.add_parser('strategy',
+        parents=[shared_parser, setting_parser],
+        help='get results for a specific strategy')
+    strategy_parser.add_argument('-s', '--strategy',
+        dest='strategy', action='store', default=None, required=True,
+        help='strategy for both sides formatted like this: '
+             'num_splits_for_1:num_splits_for_2')
+    strategy_parser.set_defaults(func=do_strategy)
+
+    minimax_parser = subparsers.add_parser('minimax',
+        parents=[shared_parser, setting_parser],
+        help='get minimax results over all strategies')
+    minimax_parser.set_defaults(func=do_minimax)
+
+    many_parser = subparsers.add_parser('many',
+        parents=[shared_parser],
+        help='get minimax summary for specified election configurations')
+    many_parser.add_argument('-s', '--settings',
+        dest='settings', action='store', default=None, required=True,
+        help='specify many percentages and number of seats, e.g. '
+             'p1,p2,p3:n1,n2,n3,n4')
+    many_parser.set_defaults(func=do_many)
+
+    args = parser.parse_args(sys.argv[1:])
+    check_args(args)
+    args.func(args)
+
+def check_args(args):
+    if hasattr(args, 'p1'):
+        if args.p1 < 0 or args.p1 > 100:
+            print 'percentage of votes for group 1 must be between 0 and 100.',
+            print 'passed in %s' % args.p1
+            sys.exit()
+    # todo: warn users that large sigmas are non-sensical
+
+def hare_largest_remainder(num_seats, percentage_groups, verbose=False):
+    quota = sum(percentage_groups) / num_seats
+    assigned_seats = []
+    remainders = []
+    for p in percentage_groups:
+        automatic_seats = int(p/quota)
+        assigned_seats.append(automatic_seats)
+        remainders.append(p/quota - automatic_seats)
+
+    if verbose:
+        print 'groups: %s' % percentage_groups
+        print 'num seats: %d' % num_seats
+        print 'quota: %.2f' % quota
+        print 'automatic seats: %s' % assigned_seats
+
+    sorted_remainders = sorted(
+        enumerate(remainders),
+        key=operator.itemgetter(1),
+        reverse=True)
+
+    # when all remainders are equal, assign seats to earlier groups
+    for i in range(num_seats - sum(assigned_seats)):
+        assigned_seats[sorted_remainders[i][0]] += 1
+
+    if verbose:
+        print 'remainders (group, remainder): %s' % sorted_remainders
+    return assigned_seats
+
+def simulate_strategy(args, num_split_1, num_split_2):
+    num_seats = int(args.num_seats)
+    p1 = args.p1
+    p2 = 100 - p1
+    groups = [p1/num_split_1] * num_split_1
+    groups = add_gaussian(groups, args.sigma_1)
+    groups_2 = [p2/num_split_2] * num_split_2
+    groups_2 = add_gaussian(groups_2, args.sigma_2)
+    groups.extend(groups_2)
+    results = hare_largest_remainder(num_seats, groups, args.verbose)
+    return (sum(results[0:num_split_1]), sum(results[num_split_1:]))
+
+def evalute_result(result, p1):
+    # todo: deal with gaussians
+    seat_ratio = float(result[0]) / sum(result)
+    vote_ratio = p1 / 100
+    print 'group 1 got %s seats; group 2 got %s seats' % result
+    if (seat_ratio < vote_ratio) :
+        print 'worse seat ratio: %.2f. vote ratio: %.2f' % \
+            (seat_ratio, vote_ratio)
+    elif (seat_ratio > vote_ratio) :
+        print 'better seat ratio: %.2f. vote ratio: %.2f' % \
+            (seat_ratio, vote_ratio)
+    else:
+        print 'same seat ratio as vote ratio'
+
+def simulate_many(args):
+    num_seats = int(args.num_seats)
+    p1 = args.p1
+    p2 = 100 - p1
+
+    best_split = 0
+    best_split_seats = 0
+    results = []
+    for num_groups_1 in range(num_seats):
+        num_groups_1 += 1
+        for num_groups_2 in range(num_seats):
+            num_groups_2 += 1
+            result = simulate_strategy(args, num_groups_1, num_groups_2)
+            results.append((num_groups_1, num_groups_2, result[0]))
+            if args.verbose:
+                print 'split group 1 evenly into %d tickets' % num_groups_1,
+                print 'got %d seats' % result[0],
+                print 'against %d even split of group 2' % num_groups_2
+    return results
+
+def minimax_results(results, verbose=False):
+    ''' assume group 2 will split tickets to minimize seats won by group 1
+        based on splitting strategy by group 1. simulate all splitting
+        combinations, and find the splitting method with the most seats
+        after accounting for minimizing efforts by group 2.
+    '''
+    max_1_seats = 0
+    max_1_split = 0
+    for k, g in itertools.groupby(results, operator.itemgetter(0)):
+        min_1_seats = min(g, key=operator.itemgetter(2))
+        if min_1_seats[2] > max_1_seats:
+            max_1_seats = min_1_seats[2]
+            max_1_split = k
+    return (max_1_split, max_1_seats)
+
+def add_gaussian(groups, sigma):
+    ''' make vote count in groups a gaussian distribution, while ensuring
+        the total vote count is unchanged.
+    '''
+    variant = [g * abs(random.normalvariate(1, float(sigma))) for g in groups]
+    diff = sum(groups) - sum(variant)
+    variant[0] += diff
+    return variant
+
+def do_strategy(args):
+    s1, s2 = [int(i) for i in args.strategy.split(':')]
+    result = simulate_strategy(args, s1, s2)
+    evalute_result(result, args.p1)
+
+def do_minimax(args):
+    results = simulate_many(args)
+    if args.verbose:
+        for r in results:
+            print r
+    split, seats = minimax_results(results, args.verbose)
+    print 'best result (preferring minimal splits):',
+    print '%s seats with %s splits' % (seats, split)
+
+def do_many(args):
+    percentages, seats = args.settings.split(':')
+    percentages = [p for p in percentages.split(',')]
+    seats = [s for s in seats.split(',')]
+    summary = collections.defaultdict(int)
+    for p in percentages:
+        for s in seats:
+            args.num_seats = int(s)
+            args.p1 = float(p)
+            results = simulate_many(args)
+            best = minimax_results(results)
+            summary[best[0]] += 1
+            if args.verbose:
+                print 'best minimax result for an election of %s seats' % s,
+                print 'with %s percent of votes:' % p,
+                print '%s splits for %s seats' % best
+    print 'split strategy that won in number of experiments'
+    print "\t".join(('splits', 'experiments'))
+    for k, v in summary.items():
+        print "%d\t%d" % (k,v)
+
+if __name__ == '__main__':
+    parse_and_do_work()
