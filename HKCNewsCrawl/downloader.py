@@ -1,10 +1,9 @@
 #!/usr/local/bin/python3
 
 import argparse
-import re
-import urllib.request, urllib.parse, urllib.error
 
 from bs4 import BeautifulSoup
+from urllib.request import urlopen, Request
 
 def get_args():
     parser = argparse.ArgumentParser(
@@ -53,11 +52,11 @@ class PageManager():
             content = None
 
         if content == None or self.args.skip_cache:
-            req = urllib.request.Request(
+            req = Request(
                 self.args.base_url,
                 headers={'User-Agent': 'Mozilla/5.0'},
             )
-            content = urllib.request.urlopen(req).read()
+            content = urlopen(req).read()
 
             with open(self.args.cache_file, 'wb') as cfile:
                 cfile.write(content)
